@@ -1,8 +1,9 @@
-"""Create the evaluation 1 model comparison from the recorded fold metrics."""
+"""Create a comparison table from the recorded fold metrics."""
 import argparse
 from pathlib import Path
-
 import pandas as pd
+
+MODEL_ORDER = ["Nearest", "Logistic Regression", "Random Forest", "KNN", "LightGBM", "MLP"]
 
 
 def write_comparison(output):
@@ -23,7 +24,7 @@ def write_comparison(output):
         "student_total_points": test.gps_points,
         "fit_seconds": test.fit_seconds,
         "inference_seconds": test.inference_seconds,
-    }).reindex(["Nearest", "LightGBM", "MLP"])
+    }).reindex(MODEL_ORDER)
     summary.to_csv(output / "comparison.csv", index_label="model")
 
 

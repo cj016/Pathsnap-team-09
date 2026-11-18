@@ -1,4 +1,4 @@
-"""Train and compare two candidate classifiers using the shared trip-grouped harness."""
+"""Train and compare five candidate classifiers using trip-grouped evaluation."""
 import argparse
 import json
 import platform
@@ -9,6 +9,7 @@ from time import perf_counter
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import numpy as np
 import pandas as pd
 from sklearn.metrics import f1_score, log_loss
 from threadpoolctl import threadpool_limits
@@ -19,10 +20,21 @@ from experiments.cross_validation import assert_no_trip_leakage, make_group_spli
 from features.data_preparation import prepare_xy
 from features.feature_engineering import FEATURE_COLUMNS
 from .comparison import write_comparison
-from .models import make_boosting, make_mlp
+from .models import (make_boosting, make_knn, make_logistic_regression,
+                     make_mlp, make_random_forest)
 
 KEYS = ["trip_id", "point_idx"]
-MODELS = {"LightGBM": make_boosting, "MLP": make_mlp}
+MODELS = {
+    "Logistic Regression": make_logistic_regression,
+    "Random Forest": make_random_forest,
+    "KNN": make_knn,
+    "LightGBM": make_boosting,
+    "MLP": make_mlp,
+}
+# Exact KNN on millions of candidate rows is prohibitively expensive in memory
+# and prediction time. Use a deterministic, class-stratified fit sample and
+# disclose its size in metrics/run.json. Validation/test rows remain complete.
+KNN_MAX_TRAIN_ROWS = 100_000
 
 
 def read_partition(cache, partition):
@@ -40,8 +52,6 @@ def read_partition(cache, partition):
 
 
 def collect_metrics(name, fold, scored, points, seconds, fit_seconds):
-    # The shared top1 helper counts empty candidate sets as misses. The challenge
-    # also counts nonempty sets with no reference arc, so calculate coverage here.
     hits = scored.loc[scored.label.eq(1), KEYS].drop_duplicates()
     marked = points.merge(hits.assign(hit=True), on=KEYS, how="left", validate="one_to_one")
     for scope in ["all", "certain"]:
@@ -59,13 +69,30 @@ def collect_metrics(name, fold, scored, points, seconds, fit_seconds):
         yield result
 
 
+def stratified_knn_sample(X, y, seed):
+    """Return a deterministic class-stratified subset for feasible KNN fitting."""
+    if len(X) <= KNN_MAX_TRAIN_ROWS:
+        return X, y
+    rng = np.random.default_rng(seed)
+    y_array = np.asarray(y)
+    classes, counts = np.unique(y_array, return_counts=True)
+    allocations = {cls: max(1, int(KNN_MAX_TRAIN_ROWS * count / len(y_array)))
+                   for cls, count in zip(classes, counts)}
+    indices = []
+    for cls in classes:
+        class_indices = np.flatnonzero(y_array == cls)
+        take = min(len(class_indices), allocations[cls])
+        indices.extend(rng.choice(class_indices, size=take, replace=False).tolist())
+    indices = np.asarray(sorted(indices[:KNN_MAX_TRAIN_ROWS]))
+    return X.iloc[indices], y.iloc[indices]
+
+
 def save_example(scored_by_model, output):
     rows = scored_by_model["LightGBM"].copy()
     rows["boosting_probability"] = rows["probability_label_1"]
     mlp = scored_by_model["MLP"][KEYS + ["arc_id", "probability_label_1"]].rename(
         columns={"probability_label_1": "mlp_probability"})
     rows = rows.merge(mlp, on=KEYS + ["arc_id"], validate="one_to_one")
-    # Select on geometry and label availability only, independent of model outcome.
     near = rows.loc[(rows.dist_rank <= 2) & ~rows.label_uncertain]
     examples = near.groupby(KEYS).agg(n=("arc_id", "size"), gap=("dist_to_arc", lambda v: v.max()-v.min()),
                                       heading_span=("heading_difference", lambda v: v.max()-v.min()),
@@ -86,7 +113,6 @@ def run(cache, output, seed, folds):
     test, test_points = read_partition(cache, "student_test")
     if set(train_points.trip_id) & set(test_points.trip_id):
         raise ValueError("Training and student-test trips overlap")
-    # Use shared candidate-row split assignments for direct comparison with teammates.
     if set(train.trip_id) != set(train_points.trip_id):
         raise ValueError("An entire training trip lacks candidates; review fold assignment")
     splits = make_group_splits(train, n_splits=folds, random_state=seed)
@@ -110,8 +136,9 @@ def run(cache, output, seed, folds):
         saved = {}
         for name, factory in MODELS.items():
             model = factory(seed)
+            fit_X, fit_y = (stratified_knn_sample(X, y, seed) if name == "KNN" else (X, y))
             start = perf_counter()
-            model.fit(X, y)
+            model.fit(fit_X, fit_y)
             fit_seconds = perf_counter() - start
             measured, scored = score_candidate_classifier(model, val, FEATURE_COLUMNS)
             metrics.extend(collect_metrics(name, fold, scored, points, measured["inference_seconds"], fit_seconds))
@@ -120,19 +147,21 @@ def run(cache, output, seed, folds):
                                  for i, v in enumerate(model[-1].loss_curve_, 1))
             if final:
                 saved[name] = scored
-            print(f"{fold} {name}: {fit_seconds:.1f}s, {len(X)} training rows", flush=True)
+            print(f"{fold} {name}: {fit_seconds:.1f}s, {len(fit_X)} fit rows "
+                  f"({len(X)} available)", flush=True)
         if final:
             save_example(saved, output)
         pd.DataFrame(metrics).to_csv(output / "metrics.csv", index=False)
         pd.DataFrame(histories).to_csv(output / "mlp_loss.csv", index=False)
     config = dict(seed=seed, features=FEATURE_COLUMNS, splits=split_log, python=platform.python_version(),
+                  knn_max_train_rows=KNN_MAX_TRAIN_ROWS,
                   versions={p: version(p) for p in ["numpy", "pandas", "scikit-learn", "lightgbm",
                                                      "shapely", "pyproj", "pyarrow", "scipy"]},
                   models={n: f(seed)[-1].get_params() for n, f in MODELS.items()})
     (output / "run.json").write_text(json.dumps(config, indent=2) + "\n")
     history = pd.DataFrame(histories).query("fold == 'student_test'")
     fig, ax = plt.subplots(figsize=(6, 3.5))
-    ax.plot(history.epoch, history.loss, color="#165c75", linewidth=2)
+    ax.plot(history.epoch, history.loss, linewidth=2)
     ax.set(xlabel="Training epoch", ylabel="Training loss", title="MLP loss on the final training fit")
     fig.tight_layout()
     fig.savefig(output / "mlp_training_loss.png", dpi=150)
