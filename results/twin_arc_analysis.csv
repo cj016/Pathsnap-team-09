@@ -1,0 +1,4 @@
+metric,points,pct,denominator_points
+true arc is rank 1,10047,52.437369519832984,19160
+true arc in top 2,16677,87.04070981210856,19160
+ambiguous (top-2 distances equal),14523,75.79853862212944,19160
