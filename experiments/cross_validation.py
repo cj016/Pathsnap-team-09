@@ -3,14 +3,15 @@ from __future__ import annotations
 from sklearn.model_selection import GroupKFold
 
 
-def make_group_splits(rows, n_splits: int = 5):
+def make_group_splits(rows, n_splits: int = 5, random_state: int = 42):
     """Return train/validation indices grouped by trip_id (no trip leakage)."""
     if "trip_id" not in rows:
         raise ValueError("Rows must contain trip_id for trip-based CV.")
     n_groups = rows["trip_id"].nunique()
     if n_groups < n_splits:
         raise ValueError(f"Need at least {n_splits} distinct trips; found {n_groups}.")
-    splitter = GroupKFold(n_splits=n_splits)
+    # Match the Logistic Regression CV configuration: shuffled, seed 42.
+    splitter = GroupKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
     groups = rows["trip_id"].to_numpy()
     y = rows["label"].to_numpy() if "label" in rows else None
     return list(splitter.split(rows, y, groups))
