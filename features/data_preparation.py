@@ -9,9 +9,10 @@ def training_rows(candidates: pd.DataFrame) -> pd.DataFrame:
     missing = required - set(candidates.columns)
     if missing:
         raise ValueError(f"Candidate table missing columns: {sorted(missing)}")
-    rows = candidates.loc[~candidates["label_uncertain"].astype(bool)].copy()
-    has_positive = rows.groupby(["trip_id", "point_idx"])["label"].transform("max").eq(1)
-    return rows.loc[has_positive].copy()
+    grouped = candidates.groupby(["trip_id", "point_idx"], sort=False)
+    certain = ~grouped["label_uncertain"].transform("any")
+    has_positive = grouped["label"].transform("max").eq(1)
+    return candidates.loc[certain & has_positive].copy()
 
 
 def model_features(rows: pd.DataFrame, feature_columns: list[str]) -> pd.DataFrame:
@@ -50,10 +51,12 @@ def point_inventory(labelled_points: pd.DataFrame) -> pd.DataFrame:
 
 def evaluate_candidate_coverage(candidates: pd.DataFrame, inventory: pd.DataFrame) -> dict:
     """Report candidate misses, including GPS points omitted from candidate CSV."""
-    keys = ["trip_id", "point_idx"]
-    present = candidates[keys].drop_duplicates().assign(has_candidate=True)
-    scored = inventory[keys].drop_duplicates().merge(present, on=keys, how="left")
-    misses = scored["has_candidate"].isna()
+    keys = ["trip_id", "point_idx", "reference_arc_id"]
+    present = candidates[["trip_id", "point_idx", "arc_id"]].rename(
+        columns={"arc_id": "reference_arc_id"}
+    ).drop_duplicates()
+    scored = inventory[keys].drop_duplicates().merge(present, on=keys, how="left", indicator=True)
+    misses = scored["_merge"].eq("left_only")
     n = len(scored)
     return {
         "n_points": int(n),

@@ -1,9 +1,14 @@
-﻿import os
+import os
 from math import isfinite
 from urllib.parse import quote
 
 import requests
 from flask import Flask, render_template, request
+
+if __package__:
+    from .route_map import route_map
+else:
+    from route_map import route_map
 
 app = Flask(__name__)
 API = os.getenv("PATHSNAP_API_URL", "http://127.0.0.1:8000").rstrip("/")
@@ -20,11 +25,14 @@ def metric(value, *, percent=False):
 @app.route("/", methods=["GET", "POST"])
 def index():
     trips, selected, route, scores, error = [], "", "", [], ""
+    reference_available = False
     try:
         response = requests.get(f"{API}/trips", timeout=(5, 10))
         response.raise_for_status()
         trips = response.json()["trip_ids"]
-        if not isinstance(trips, list) or not all(isinstance(t, str) and t for t in trips):
+        if not isinstance(trips, list) or not all(
+            isinstance(t, str) and t for t in trips
+        ):
             trips = []
             raise ValueError("Invalid trip list")
 
@@ -33,24 +41,32 @@ def index():
             if selected not in trips:
                 raise ValueError("Unknown trip")
 
-            response = requests.post(
-                f"{API}/predict/{quote(selected, safe='')}", timeout=(5, 180)
+            response = requests.get(
+                f"{API}/predict/{quote(selected, safe='')}", timeout=(5, 300)
             )
             response.raise_for_status()
             result = response.json()
 
             if result["trip_id"] != selected:
                 raise ValueError("Trip ID mismatch")
-            if not isinstance(result["map_html"], str) or not result["map_html"].strip():
-                raise ValueError("Missing map")
-
             m = result["metrics"]
+            reference_available = m["status"] == "available"
             scores = [
-                ("Classifier Top-1", metric(m["top1_accuracy"], percent=True)),
-                ("Decoded accuracy", metric(m["decoded_point_accuracy"], percent=True)),
-                ("Inference time", metric(m["inference_time_ms"])),
+                (
+                    "Classifier Top-1",
+                    metric(m.get("classifier", {}).get("top1_accuracy"), percent=True),
+                ),
+                (
+                    "Decoded Top-1",
+                    metric(m.get("hmm", {}).get("top1_accuracy"), percent=True),
+                ),
+                (
+                    "Route continuity",
+                    metric(result["route_continuity"]["hmm"]["rate"], percent=True),
+                ),
+                ("Inference time", metric(result["timing_seconds"]["total"] * 1000)),
             ]
-            route = result["map_html"]
+            route = route_map(result)
 
     except requests.Timeout:
         error = "The API timed out."
@@ -63,8 +79,13 @@ def index():
         app.logger.warning("Trip %r: %s", selected, error)
 
     return render_template(
-        "index.html", trips=trips, selected=selected,
-        route=route, scores=scores, error=error
+        "index.html",
+        trips=trips,
+        selected=selected,
+        route=route,
+        scores=scores,
+        error=error,
+        reference_available=reference_available,
     )
 
 

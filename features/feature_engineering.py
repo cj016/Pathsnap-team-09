@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-import shapely
 
 FEATURE_COLUMNS = [
     "dist_to_arc",
@@ -24,7 +23,7 @@ FEATURE_COLUMNS = [
 ]
 BASE_COLUMNS = {
     "trip_id", "point_idx", "timestamp", "x", "y", "arc_id",
-    "dist_to_arc", "dist_rank", "label", "label_uncertain",
+    "dist_to_arc", "dist_rank",
 }
 
 
@@ -84,9 +83,7 @@ def build_trip_features(candidate_rows: pd.DataFrame, trip: dict, lines=None) ->
     movement_bearing[np.hypot(dx, dy) < 0.01] = np.nan
     gps_heading = pd.Series(movement_bearing).ffill().to_numpy()
 
-    # Person 1's .track loader reads timestamps as numeric seconds (their
-    # validation/EDA reports median timestamp delta = 1 second). Do not pass
-    # numeric seconds to pd.to_datetime: pandas would interpret them as ns.
+    # Track timestamps are seconds.
     raw_timestamps = gps["timestamp"]
     if pd.api.types.is_numeric_dtype(raw_timestamps):
         dt = pd.to_numeric(raw_timestamps, errors="coerce").diff().to_numpy(dtype=float)

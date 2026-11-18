@@ -2,6 +2,8 @@
 from __future__ import annotations
 import pandas as pd
 
+from features.data_preparation import evaluate_candidate_coverage
+
 
 def nearest_candidate_predictions(candidates: pd.DataFrame) -> pd.DataFrame:
     required = {"trip_id", "point_idx", "arc_id", "dist_rank"}
@@ -34,7 +36,7 @@ def nearest_candidate_top1(candidates: pd.DataFrame, inventory: pd.DataFrame,
         scored["predicted_arc_id"] == scored["reference_arc_id"]
     )
     n = len(scored)
-    misses = int(scored["predicted_arc_id"].isna().sum())
+    misses = evaluate_candidate_coverage(candidates, points)["candidate_misses"]
     return {
         "top1_accuracy": float(correct.sum() / n) if n else float("nan"),
         "correct_points": int(correct.sum()),

@@ -24,9 +24,10 @@ def load_point_labels(labels_file: Path, observation_count: int) -> list[int] | 
     expected = list(range(observation_count))
     if labels["point_idx"].tolist() != expected:
         raise ValueError(f"Labels in {labels_file} must contain ordered indices 0..N-1")
-    if labels["arc_id"].isnull().any():
-        raise ValueError("Point labels include null arc ids; decide a documented policy")
-    return labels["arc_id"].astype(int).tolist()
+    arcs = pd.to_numeric(labels["arc_id"], errors="raise")
+    if not np.isfinite(arcs).all() or (arcs < 0).any() or (arcs % 1 != 0).any():
+        raise ValueError("Point labels must be nonnegative integer arc ids")
+    return arcs.astype(int).tolist()
 
 
 def evaluate_predictions(prediction: dict, labels: list[int] | None) -> dict:
@@ -37,11 +38,14 @@ def evaluate_predictions(prediction: dict, labels: list[int] | None) -> dict:
         raise ValueError(f"Expected {n} reference labels, received {len(labels)}")
     truth = np.asarray(labels, dtype=int)
     results: dict = {"status": "available", "reference_observations": n}
+    correct = {}
     for method, key in (("classifier", "classifier_arc_id"), ("hmm", "hmm_arc_id")):
         raw = [row[key] for row in prediction["observations"]]
         # Arc ids cannot be negative; -1 explicitly means 'no candidate'.
         guess = np.asarray([int(x) if x is not None else -1 for x in raw], dtype=int)
+        correct[method] = truth == guess
         results[method] = {
+            "correct_points": int(correct[method].sum()),
             "top1_accuracy": float(accuracy_score(truth, guess)),
             "macro_f1": float(f1_score(truth, guess, average="macro", zero_division=0)),
             "exact_sequence_match": bool(np.array_equal(truth, guess)),
@@ -50,6 +54,8 @@ def evaluate_predictions(prediction: dict, labels: list[int] | None) -> dict:
             )) if n > 1 else None,
             "missing_prediction_count": int((guess == -1).sum()),
         }
+    results["hmm_helped"] = int((correct["hmm"] & ~correct["classifier"]).sum())
+    results["hmm_hurt"] = int((correct["classifier"] & ~correct["hmm"]).sum())
     results["hmm_minus_classifier_top1"] = (
         results["hmm"]["top1_accuracy"] - results["classifier"]["top1_accuracy"]
     )

@@ -71,6 +71,8 @@ def create_app() -> FastAPI:
             get_predictor()
         except (NotConfigured, ValueError) as exc:
             return {"status": "not_ready", "reason": str(exc)}
+        if not ids:
+            return {"status": "not_ready", "reason": "No complete trip folders found"}
         return {"status": "ready", "available_trips": len(ids)}
 
     @application.get("/trips")
@@ -92,8 +94,7 @@ def create_app() -> FastAPI:
                 raise HTTPException(status_code=404, detail="Unknown trip ID")
             predictor = get_predictor()
             output = predictor.predict(data_root() / trip_id)
-            # This read occurs AFTER predictions and is separate from model and UI.
-            # File is optional on deployment; .route is NEVER treated as point labels.
+            # Optional point references are used only after decoding.
             reference_root = os.getenv("PATHSNAP_REFERENCE_LABELS_DIR")
             labels = (
                 load_point_labels(Path(reference_root) / f"{trip_id}.csv", output["observation_count"])

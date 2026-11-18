@@ -3,6 +3,8 @@ from __future__ import annotations
 import time
 import numpy as np
 import pandas as pd
+
+from features.data_preparation import evaluate_candidate_coverage
 from sklearn.metrics import accuracy_score, f1_score, log_loss
 
 
@@ -76,7 +78,7 @@ def top1_accuracy(scored_candidates: pd.DataFrame, inventory: pd.DataFrame,
         merged["predicted_arc_id"] == merged["reference_arc_id"]
     )
     n = len(merged)
-    misses = int(merged["predicted_arc_id"].isna().sum())
+    misses = evaluate_candidate_coverage(scored_candidates, points)["candidate_misses"]
     return {
         "top1_accuracy": float(correct.sum() / n) if n else float("nan"),
         "correct_points": int(correct.sum()),
