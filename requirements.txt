@@ -1,3 +1,22 @@
+fastapi>=0.110,<1.0
+Flask>=3.1,<4
+folium>=0.18,<1
+httpx>=0.26,<1.0
+joblib>=1.3,<2.0
+jupyter
+lightgbm==4.7.0
+matplotlib==3.10.8
+networkx>=3.0,<4.0
+numpy==2.3.5
+pandas==2.2.3
+pyarrow==26.0.1
+pyproj==3.8.0
+pytest>=8.0,<10.0
+-r model_experiments/requirements.txt
 -r PathSnap_Person4_requirements.txt
 -r ui/requirements.txt
-jupyter
+requests>=2.32,<3
+scikit-learn==1.8.0
+scipy==1.17.0
+shapely==2.2.0
+uvicorn>=0.27,<1.0

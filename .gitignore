@@ -3,7 +3,6 @@ Data/
 processed/
 __pycache__/
 .ipynb_checkpoints/
-.claude/
 *.parquet
 /sample_candidates_one_trip.csv
 /processed.zip
@@ -12,3 +11,12 @@ __pycache__/
 /logs/
 /reference_labels/
 .pytest_cache/
+
+.venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.DS_Store
+Thumbs.db
+.env
+files.txt

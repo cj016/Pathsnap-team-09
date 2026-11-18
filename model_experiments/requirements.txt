@@ -1,9 +1,0 @@
-lightgbm==4.7.0
-scikit-learn==1.8.0
-numpy==2.3.5
-scipy==1.17.0
-pandas==2.2.3
-pyarrow==26.0.1
-pyproj==3.8.0
-shapely==2.2.0
-matplotlib==3.10.8
