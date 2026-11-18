@@ -1,0 +1,6 @@
+trip_id,partition,n_points,n_nodes,n_arcs,n_route_arcs,nan_values,timestamps_sorted,duplicate_timestamps,duplicate_points,median_dt_s,max_gap_s,n_gaps_gt_10s,lon_min,lon_max,lat_min,lat_max,lonlat_in_range,arc_nodes_in_range,route_ids_in_range,route_breaks,route_repeated_arcs,epsg,label_dist_median_m,label_uncertain_frac
+00000001,train,1315,88809,165790,525,0,True,0,0,1.0,16.0,1,8.570524,8.64786,49.844053,50.211882,True,True,True,0,0,32632,4.332596076576084,0.0
+00000002,train,7243,7936,16139,262,0,True,0,2,1.0,160.0,41,10.999961,11.050902,47.658344,47.695459,True,True,True,1,0,32632,5.962332002243939,0.12039210271986746
+00000003,train,821,9138,18028,79,0,True,0,0,1.0,2.0,0,37.154202,37.201595,55.977135,56.007585,True,True,True,0,0,32637,4.629597397595921,0.0
+00000004,train,1064,7350,15499,320,0,True,0,0,1.0,51.0,215,12.34228,12.459615,52.590308,52.71896,True,True,True,0,0,32633,8.609608757448981,0.0018796992481203006
+00000005,train,1045,898,1579,105,0,True,0,0,1.0,1.0,0,35.485577,35.544315,49.357581,49.613085,True,True,True,0,0,32636,4.529081073268727,0.0
