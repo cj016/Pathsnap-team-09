@@ -1,0 +1,8 @@
+Data/
+.venv/
+processed/
+__pycache__/
+.ipynb_checkpoints/
+.claude/
+*.parquet
+/sample_candidates_one_trip.csv
