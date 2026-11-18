@@ -1,6 +1,5 @@
-"""Candidate and GPS-point evaluation metrics for PathSnap."""
+"""Candidate classification and per-GPS-point evaluation metrics."""
 from __future__ import annotations
-
 import time
 import numpy as np
 import pandas as pd
@@ -8,117 +7,92 @@ from sklearn.metrics import accuracy_score, f1_score, log_loss
 
 
 def _positive_probability(model, X):
-    """Return P(label=1), locating class 1 safely on sklearn estimators/pipelines."""
+    """Extract P(class=1) from an sklearn estimator or Pipeline."""
     if not hasattr(model, "predict_proba"):
-        raise TypeError("The estimator must implement predict_proba for this evaluator.")
-    probabilities = np.asarray(model.predict_proba(X))
+        raise TypeError("Estimator must implement predict_proba.")
+    p = np.asarray(model.predict_proba(X))
     classes = getattr(model, "classes_", None)
     if classes is None and hasattr(model, "named_steps"):
-        final_estimator = list(model.named_steps.values())[-1]
-        classes = getattr(final_estimator, "classes_", None)
+        classes = getattr(list(model.named_steps.values())[-1], "classes_", None)
     if classes is None:
-        if probabilities.ndim == 2 and probabilities.shape[1] == 2:
-            return probabilities[:, 1]
-        raise ValueError("Could not determine which probability column represents label=1.")
+        if p.ndim == 2 and p.shape[1] == 2:
+            return p[:, 1]
+        raise ValueError("Cannot identify the positive-class probability column.")
     classes = list(classes)
-    if 1 not in classes:
-        return np.zeros(len(X), dtype=float)
-    return probabilities[:, classes.index(1)]
+    return p[:, classes.index(1)] if 1 in classes else np.zeros(len(X), dtype=float)
 
 
 def score_candidate_classifier(model, candidates: pd.DataFrame, feature_columns: list[str]):
-    """Return candidate-level metrics and per-candidate probabilities."""
+    """Candidate-row metrics and scored candidate table."""
     X = candidates.loc[:, feature_columns].astype(float)
     y = candidates["label"].astype(int).to_numpy()
     t0 = time.perf_counter()
     pred = model.predict(X)
-    probability = _positive_probability(model, X)
+    p1 = _positive_probability(model, X)
     elapsed = time.perf_counter() - t0
-
+    # Explicit two-class probabilities keep log_loss valid for sklearn pipelines.
+    p2 = np.column_stack([1.0 - p1, p1]).clip(1e-15, 1 - 1e-15)
     metrics = {
         "candidate_accuracy": float(accuracy_score(y, pred)),
         "macro_f1": float(f1_score(y, pred, average="macro", zero_division=0)),
-        "log_loss": float(log_loss(y, np.column_stack([1 - probability, probability]), labels=[0, 1])),
+        "log_loss": float(log_loss(y, p2, labels=[0, 1])),
         "inference_seconds": float(elapsed),
         "candidate_rows": int(len(candidates)),
     }
     scored = candidates.copy()
     scored["predicted_label"] = pred
-    scored["probability_label_1"] = probability
+    scored["probability_label_1"] = p1
     return metrics, scored
 
 
-def top1_accuracy(
-    scored_candidates: pd.DataFrame,
-    point_inventory: pd.DataFrame,
-    *,
-    include_uncertain: bool,
-) -> dict:
-    """Choose highest-scoring candidate per point; misses count as incorrect.
+def top1_accuracy(scored_candidates: pd.DataFrame, inventory: pd.DataFrame,
+                  *, include_uncertain: bool = False) -> dict:
+    """Choose highest probability candidate per point; zero-candidate points wrong.
 
-    point_inventory must contain one row per GPS point and reference_arc_id.
-    It must include points with zero candidate rows. If candidate-level label
-    is present, it may be used as the reference indicator for points with
-    candidates, but reference_arc_id is preferred.
+    inventory must include one row per GPS point, including points with no
+    candidates. Its reference arc field is reference_arc_id (see
+    features.data_preparation.point_inventory).
     """
-    required_inventory = {"trip_id", "point_idx"}
-    missing = required_inventory - set(point_inventory.columns)
+    needed = {"trip_id", "point_idx", "reference_arc_id"}
+    missing = needed - set(inventory.columns)
     if missing:
-        raise ValueError(f"point_inventory missing columns: {sorted(missing)}")
-    inventory = point_inventory.drop_duplicates(["trip_id", "point_idx"]).copy()
+        raise ValueError(f"Point inventory missing columns: {sorted(missing)}")
+    points = inventory.drop_duplicates(["trip_id", "point_idx"]).copy()
     if not include_uncertain:
-        if "label_uncertain" not in inventory:
-            raise ValueError("Need label_uncertain in point_inventory for certain-only evaluation.")
-        inventory = inventory.loc[~inventory["label_uncertain"].astype(bool)]
-
+        if "label_uncertain" not in points:
+            raise ValueError("Certain-only Top-1 requires label_uncertain in inventory.")
+        points = points.loc[~points["label_uncertain"].astype(bool)]
     best = (
         scored_candidates.sort_values(
             ["trip_id", "point_idx", "probability_label_1"],
-            ascending=[True, True, False],
+            ascending=[True, True, False], kind="stable"
         )
         .drop_duplicates(["trip_id", "point_idx"])
+        [["trip_id", "point_idx", "arc_id"]]
+        .rename(columns={"arc_id": "predicted_arc_id"})
     )
-    merged = inventory.merge(
-        best[["trip_id", "point_idx", "arc_id"]],
-        on=["trip_id", "point_idx"], how="left"
+    merged = points.merge(best, on=["trip_id", "point_idx"], how="left")
+    correct = merged["predicted_arc_id"].notna() & (
+        merged["predicted_arc_id"] == merged["reference_arc_id"]
     )
-    if "reference_arc_id" in merged:
-        correct = merged["arc_id"].notna() & (merged["arc_id"] == merged["reference_arc_id"])
-    elif "label" in scored_candidates:
-        references = (
-            scored_candidates.loc[scored_candidates["label"].astype(int).eq(1),
-                                  ["trip_id", "point_idx", "arc_id"]]
-            .drop_duplicates(["trip_id", "point_idx"])
-            .rename(columns={"arc_id": "reference_arc_id"})
-        )
-        merged = merged.merge(references, on=["trip_id", "point_idx"], how="left")
-        correct = merged["arc_id"].notna() & (merged["arc_id"] == merged["reference_arc_id"])
-    else:
-        raise ValueError("Need reference_arc_id in inventory or positive labels in candidates.")
-
-    denominator = len(merged)
+    n = len(merged)
+    misses = int(merged["predicted_arc_id"].isna().sum())
     return {
-        "top1_accuracy": float(correct.sum() / denominator) if denominator else float("nan"),
+        "top1_accuracy": float(correct.sum() / n) if n else float("nan"),
         "correct_points": int(correct.sum()),
-        "evaluated_points": int(denominator),
-        "candidate_misses": int(merged["arc_id"].isna().sum()),
-        "candidate_miss_rate": float(merged["arc_id"].isna().sum() / denominator) if denominator else float("nan"),
+        "evaluated_points": int(n),
+        "candidate_misses": misses,
+        "candidate_miss_rate": float(misses / n) if n else float("nan"),
     }
 
 
-def evaluate_model(
-    model,
-    candidates: pd.DataFrame,
-    point_inventory: pd.DataFrame,
-    feature_columns: list[str],
-) -> dict:
-    """Combined metrics. Requires one-row-per-point inventory for correct Top-1."""
+def evaluate_model(model, candidates: pd.DataFrame, inventory: pd.DataFrame,
+                   feature_columns: list[str]) -> dict:
+    """Return candidate metrics plus Top-1 with and without uncertain points."""
     candidate_metrics, scored = score_candidate_classifier(model, candidates, feature_columns)
-    certain = top1_accuracy(scored, point_inventory, include_uncertain=False)
-    all_points = top1_accuracy(scored, point_inventory, include_uncertain=True)
     return {
         **candidate_metrics,
-        "top1_certain": certain,
-        "top1_with_uncertain": all_points,
+        "top1_certain": top1_accuracy(scored, inventory, include_uncertain=False),
+        "top1_with_uncertain": top1_accuracy(scored, inventory, include_uncertain=True),
         "scored_candidates": scored,
     }
