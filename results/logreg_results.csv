@@ -1,0 +1,2 @@
+cv_macro_f1_mean,cv_macro_f1_std,test_top1_accuracy,test_top1_accuracy_certain_points,test_macro_f1,test_log_loss,nearest_arc_top1_accuracy,train_time_s,inference_time_s,n_train_rows,n_test_rows,coef_dist_to_arc,coef_dist_rank
+0.6955552703539885,0.01868447952679281,0.5243736951983299,0.5326017811704835,0.67914009445724,0.11373704053043436,0.5243736951983299,3.270721673965454,0.025448083877563477,2894726,355578,-1.5893770642984866,-11.99768310405056
