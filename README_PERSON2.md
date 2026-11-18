@@ -1,11 +1,11 @@
-# Person 2 — Feature engineering and evaluation framework
+# Person 2 — feature engineering and evaluation
 
-This branch adds the shared candidate feature interface and reusable evaluation
-utilities for the PathSnap map-matching project.
+This branch is based on Person 1's `data-preprocessing` branch. It uses the same
+trip objects and candidate table produced by `src.data_prep`.
 
 ## Agreed model feature order
 
-All model code should use this exact order:
+All model implementations must use this exact feature order:
 
 1. `dist_to_arc`
 2. `heading_difference`
@@ -14,93 +14,109 @@ All model code should use this exact order:
 5. `speed`
 6. `position_along_arc`
 
-Use `features.feature_engineering.get_feature_matrix(table)` to select them.
+Use `features.feature_engineering.get_feature_matrix(table)` to select this
+ordered matrix.
 
-## Candidate table contract
+## Building the feature batch from one trip
 
-Each row is one (GPS point, candidate directed arc) pair. Required base
-columns are `trip_id, point_idx, timestamp, x, y, arc_id, dist_to_arc,
-dist_rank`. The sample supplied by Person 1 also contains `label` and
-`label_uncertain`.
+Person 1's `src.data_prep` exposes `load_trip`, `project_trip`, `arc_lines`
+and `candidates`. Raw `Data/` files are expected locally and are gitignored.
 
-The current sample alone does **not** contain enough information to calculate
-all six features. The geometry-dependent features require directed arc endpoint
-coordinates and bearings joined from `.nodes/.arcs`, while GPS heading/speed
-require ordered points from `.track`. The feature code raises explicit
-errors rather than inserting made-up values.
+```python
+from src.data_prep import DATA, load_trip, project_trip, arc_lines, candidates
+from features.feature_engineering import build_trip_features, FEATURE_COLUMNS, get_feature_matrix
 
-For an initial geometry join, add these columns to each candidate row:
+trip_id = "00000001"
+trip = project_trip(load_trip(DATA / "train" / trip_id))
+lines = arc_lines(trip)
+candidate_rows = candidates(trip, lines, "train", radius=75)
 
-- `arc_start_x, arc_start_y, arc_end_x, arc_end_y` (UTM metres)
-- `gps_heading, arc_heading` (compass degrees clockwise from north)
+features = build_trip_features(candidate_rows, trip, lines)
+X = get_feature_matrix(features)
+```
 
-The arc length implementation currently uses endpoint chord length. For
-polyline arcs, use the sum of segment lengths once full geometry is available.
+The exact feature definitions:
+- `dist_to_arc`: Person 1's Shapely distance from GPS point to candidate line.
+- `heading_difference`: smallest angular difference between consecutive-point GPS
+  movement bearing and directed arc bearing, degrees in [0, 180].
+- `arc_length`: directed arc endpoint segment length in metres.
+- `dist_rank`: Person 1's nearest-first candidate rank.
+- `speed`: GPS displacement divided by elapsed seconds, metres/second.
+  Stationary samples carry the previous valid movement heading; zero/invalid
+  time intervals and gaps above 30 seconds do not yield a speed.
+- `position_along_arc`: clamped scalar projection onto the directed arc, from
+  0 (start node) to 1 (end node).
 
-## Training exclusions
+For this dataset's `src.data_prep.arc_lines`, each road arc is a straight
+node-to-node directed segment, so endpoint length and line bearing are
+consistent with the candidate geometry.
+
+## Training rows and candidate misses
 
 `features.data_preparation.training_rows` removes uncertain points and removes
-all candidate rows belonging to a GPS point that has no positive candidate.
-Candidate-miss points remain part of evaluation through a separate
-point_inventory table.
+all candidate rows for GPS points whose correct arc is absent from the candidate
+set (no positive row). Candidate misses are not usable as candidate-classifier
+training examples.
 
-## Evaluation
+For evaluation, create the full point inventory from
+`processed/points_labelled.parquet` using
+`features.data_preparation.point_inventory`. This includes GPS points with
+zero candidates. The candidate Parquet alone cannot provide the correct
+denominator for Top-1 accuracy or candidate miss rate.
 
-`evaluation.metrics.score_candidate_classifier` calculates candidate-level
-accuracy, macro F1, log loss and inference time and appends P(label=1).
-`top1_accuracy` chooses the highest-probability arc per point. It requires a
-one-row-per-GPS-point inventory, including points with zero candidate rows.
-Provide `reference_arc_id` in the inventory when possible. Otherwise positive
-candidate labels are used to recover the reference arc for points with a
-candidate hit.
-
-`evaluation.baseline.nearest_candidate_top1` evaluates the always-pick-
-`dist_rank=1` baseline using the same point inventory. A zero-candidate point
-is counted wrong.
-
-## sklearn pipeline integration
+## sklearn Pipeline integration
 
 ```python
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
-from sklearn.neural_network import MLPClassifier
-
+from sklearn.ensemble import RandomForestClassifier
 from features.feature_engineering import FEATURE_COLUMNS, get_feature_matrix
 from features.data_preparation import prepare_xy
 
-train_rows = ...  # candidate rows from training trips
+train_rows = ... # features from training trips
 X_train, y_train = prepare_xy(train_rows, FEATURE_COLUMNS)
-
-mlp = Pipeline([
+model = Pipeline([
     ("scale", StandardScaler()),
-    ("model", MLPClassifier(random_state=42, max_iter=300)),
+    ("classifier", RandomForestClassifier(random_state=42)),
 ])
-mlp.fit(X_train, y_train)
+model.fit(X_train, y_train)
 
-# Use the same column order at inference:
 X_eval = get_feature_matrix(eval_feature_table)
-probabilities = mlp.predict_proba(X_eval)
+probabilities = model.predict_proba(X_eval)
 ```
 
-All scaling/normalisation must be fitted on training data only. If using
-GroupKFold, fit the entire pipeline separately within each fold.
+Scaling/imputation must be fitted on training data only and inside the
+cross-validation pipeline. The feature table can contain NaNs for initial GPS
+heading or invalid/gapped speed; use a train-fitted imputer in the sklearn
+pipeline (for example `SimpleImputer(strategy="median")`) before scaling.
 
-## Trip-based cross-validation
+## Metrics and baseline
+
+- `evaluation.metrics.score_candidate_classifier`: candidate-row accuracy,
+  macro F1, log loss, inference duration and candidate probabilities.
+- `evaluation.metrics.top1_accuracy`: highest-probability arc per point;
+  counts candidate misses as wrong using the full point inventory.
+- `evaluation.baseline.nearest_candidate_top1`: always choose the
+  `dist_rank=1` candidate; same denominator and uncertainty filtering.
+- Report Top-1 both excluding uncertain points and including all points.
+
+## Trip-grouped CV
 
 ```python
 from experiments.cross_validation import make_group_splits, assert_no_trip_leakage
-
 splits = make_group_splits(train_rows, n_splits=5)
 assert_no_trip_leakage(train_rows, splits)
 ```
 
-GroupKFold splits by `trip_id`, preventing points from one trip appearing in
-both train and validation for the same fold.
+Keep all points from a trip together in a fold. Fit preprocessing pipelines
+inside each fold. Do not include `label`, `label_uncertain`, `arc_id`,
+`trip_id`, `point_idx` or reference metadata in model features.
 
-## Important input still needed
+## Inputs and reproducibility
 
-To complete and validate the six-feature batch, integrate the real
-`.track`, `.nodes`, and `.arcs` data. The sample rows in the team message
-are sufficient to establish the CSV schema and labels, but not the geometry.
-No model scores or performance claims are included here because the full data
-has not yet been run.
+Run Person 1's preprocessing pipeline first to create
+`processed/points_labelled.parquet` and candidate Parquet files. Raw `Data/`
+is not committed to Git. Do not report metrics until the actual code has been
+run on the permitted dataset. The sample Logistic Regression row in
+`results/logreg_results.csv` is Person 1's preprocessing-branch output, not
+a result produced by this Person 2 framework.
