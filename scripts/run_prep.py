@@ -14,7 +14,7 @@ from joblib import Parallel, delayed
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from src.data_prep import PARTITIONS, RADII, list_trips, logreg_baseline, pick_radius, process_trip, summarise_sweep  # noqa: E402
+from src.data_prep import PARTITIONS, RADII, list_trips, logreg_baseline, pick_radius, plot_confusion_matrix, process_trip, summarise_sweep  # noqa: E402
 
 PROCESSED, RESULTS = ROOT / "processed", ROOT / "results"
 
@@ -28,6 +28,7 @@ def main():
         res = logreg_baseline(pd.read_parquet(PROCESSED / "candidates_train.parquet"),
                               pd.read_parquet(PROCESSED / "candidates_test.parquet"))
         pd.DataFrame([res]).to_csv(RESULTS / "logreg_results.csv", index=False)
+        plot_confusion_matrix(res, ROOT / "reports" / "figures" / "logreg_confusion_matrix.png")
         print(pd.Series(res).to_string())
         return
     PROCESSED.mkdir(exist_ok=True)

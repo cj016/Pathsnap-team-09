@@ -203,7 +203,7 @@ def logreg_baseline(train, test, seed=42):
     per CV fold). Uncertain-label points are left out of training. Returns one row of metrics."""
     import time
     from sklearn.linear_model import LogisticRegression
-    from sklearn.metrics import f1_score, log_loss
+    from sklearn.metrics import confusion_matrix, f1_score, log_loss, precision_score, recall_score
     from sklearn.model_selection import GroupKFold, cross_val_score
     from sklearn.pipeline import make_pipeline
     from sklearn.preprocessing import StandardScaler
@@ -216,14 +216,40 @@ def logreg_baseline(train, test, seed=42):
 
     t0 = time.time(); model.fit(X, y); train_s = time.time() - t0
     t0 = time.time(); proba = model.predict_proba(test[FEATURES])[:, 1]; infer_s = time.time() - t0
+    y_test, y_pred = test["label"], (proba >= 0.5).astype(int)
+    (tn, fp), (fn, tp) = confusion_matrix(y_test, y_pred, labels=[0, 1])  # rows = true 0/1, cols = predicted 0/1
     return {
         "cv_macro_f1_mean": cv_f1.mean(), "cv_macro_f1_std": cv_f1.std(),
         "test_top1_accuracy": top1_accuracy(test, proba),
         "test_top1_accuracy_certain_points": top1_accuracy(test[~test["label_uncertain"]], proba[~test["label_uncertain"].to_numpy()]),
-        "test_macro_f1": f1_score(test["label"], proba >= 0.5, average="macro"),
-        "test_log_loss": log_loss(test["label"], proba),
+        "test_macro_f1": f1_score(y_test, y_pred, average="macro"),
+        "test_macro_precision": precision_score(y_test, y_pred, average="macro", zero_division=0),
+        "test_macro_recall": recall_score(y_test, y_pred, average="macro", zero_division=0),
+        "test_tn": int(tn), "test_fp": int(fp), "test_fn": int(fn), "test_tp": int(tp),
+        "test_log_loss": log_loss(y_test, proba),
         "nearest_arc_top1_accuracy": test.loc[test["dist_rank"] == 1, "label"].sum() / test.groupby(["trip_id", "point_idx"]).ngroups,
         "train_time_s": train_s, "inference_time_s": infer_s,
         "n_train_rows": len(tr), "n_test_rows": len(test),
         "coef_dist_to_arc": model[-1].coef_[0][0], "coef_dist_rank": model[-1].coef_[0][1],
     }
+
+
+def plot_confusion_matrix(res, path):
+    """Save the student_test confusion matrix (counts and row %) from a logreg_baseline result row."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    cm = np.array([[res["test_tn"], res["test_fp"]], [res["test_fn"], res["test_tp"]]])
+    pct = cm / cm.sum(axis=1, keepdims=True)
+    fig, ax = plt.subplots(figsize=(4.5, 4))
+    ax.imshow(pct, cmap="Blues", vmin=0, vmax=1)
+    for i in range(2):
+        for j in range(2):
+            ax.text(j, i, f"{cm[i, j]:,}\n({pct[i, j]:.1%})", ha="center", va="center",
+                    color="white" if pct[i, j] > 0.5 else "black")
+    ax.set(xticks=[0, 1], yticks=[0, 1], xticklabels=["0 (wrong arc)", "1 (true arc)"],
+           yticklabels=["0 (wrong arc)", "1 (true arc)"], xlabel="predicted", ylabel="true",
+           title="LR (dist_to_arc, dist_rank)\nstudent_test candidate rows, threshold 0.5")
+    fig.savefig(path, dpi=130, bbox_inches="tight")
+    plt.close(fig)

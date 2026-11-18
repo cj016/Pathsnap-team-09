@@ -9,3 +9,4 @@ matplotlib
 scikit-learn
 jupyter
 joblib
+lightgbm==4.7.0
