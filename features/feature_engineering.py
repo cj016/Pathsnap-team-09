@@ -1,15 +1,18 @@
-"""Build the shared candidate-arc feature matrix for PathSnap.
+"""PathSnap candidate features, built from Person 1's preprocessing objects.
 
-Input rows represent one (GPS point, candidate arc) pair.  The two existing
-features are supplied by Person 1.  Geometry/trajectory-dependent features
-are computed only when the necessary columns are present; otherwise the
-function fails with an actionable message instead of fabricating values.
+One candidate row = one (GPS point, directed candidate arc) pair.
+The source data is trip-local: src.data_prep loads .track/.nodes/.arcs,
+projects coordinates to UTM metres and creates Shapely LineStrings.
+
+Feature order shared with all classifiers:
+  dist_to_arc, heading_difference, arc_length, dist_rank, speed,
+  position_along_arc
 """
 from __future__ import annotations
 
-from typing import Iterable
 import numpy as np
 import pandas as pd
+import shapely
 
 FEATURE_COLUMNS = [
     "dist_to_arc",
@@ -19,175 +22,119 @@ FEATURE_COLUMNS = [
     "speed",
     "position_along_arc",
 ]
-
-REQUIRED_BASE_COLUMNS = {
+BASE_COLUMNS = {
     "trip_id", "point_idx", "timestamp", "x", "y", "arc_id",
-    "dist_to_arc", "dist_rank",
+    "dist_to_arc", "dist_rank", "label", "label_uncertain",
 }
 
 
-def _angle_difference_degrees(a: pd.Series, b: pd.Series) -> pd.Series:
-    """Smallest absolute angular difference in degrees (range 0..180)."""
-    return ((a - b + 180.0) % 360.0 - 180.0).abs()
+def _bearing_deg(dx, dy):
+    """Compass bearing clockwise from north, in degrees [0, 360)."""
+    return (np.degrees(np.arctan2(dx, dy)) + 360.0) % 360.0
 
 
-def add_heading_difference(
-    candidates: pd.DataFrame,
-    *,
-    gps_heading_col: str = "gps_heading",
-    arc_heading_col: str = "arc_heading",
-) -> pd.DataFrame:
-    """Add absolute GPS-vs-arc bearing difference when bearings are available.
+def _angle_delta(a, b):
+    """Smallest absolute circular difference in degrees."""
+    return np.abs((a - b + 180.0) % 360.0 - 180.0)
 
-    Bearings use compass degrees clockwise from north. This function does not
-    infer direction from arc IDs: both bearings must be explicit.
+
+def build_trip_features(candidate_rows: pd.DataFrame, trip: dict, lines=None) -> pd.DataFrame:
+    """Add the four geometry/trajectory features using a loaded/projected trip.
+
+    Parameters
+    ----------
+    candidate_rows:
+        Output of src.data_prep.candidates(...), possibly filtered to the
+        chosen radius. Candidate arc_id is the zero-based row index in trip
+        'arcs', and point_idx is the row index in trip 'track'.
+    trip:
+        Return value from src.data_prep.project_trip(load_trip(...)).
+        Must contain track (x,y,timestamp), nodes (x,y), arcs(from_node,to_node).
+    lines:
+        Optional Shapely array from src.data_prep.arc_lines(trip).
+
+    Notes
+    -----
+    arc_length is the endpoint length. These arcs in Person 1's implementation
+    are directed node-to-node segments, so this is their segment length.
+    Heading difference compares GPS movement bearing to the directed arc
+    bearing. At stationary GPS samples, GPS heading is carried forward from
+    the previous valid movement within that trip; the first unavailable
+    bearing remains NaN and must be imputed in a train-fitted pipeline.
+    position_along_arc is the clamped scalar projection onto the directed
+    segment: 0 at its start node and 1 at its end node.
     """
-    out = candidates.copy()
-    if gps_heading_col not in out or arc_heading_col not in out:
-        raise ValueError(
-            "heading_difference needs gps_heading and arc_heading. "
-            "Provide GPS bearings from consecutive track points and directed "
-            "arc bearings from the .nodes/.arcs road geometry."
-        )
-    out["heading_difference"] = _angle_difference_degrees(
-        pd.to_numeric(out[gps_heading_col], errors="coerce"),
-        pd.to_numeric(out[arc_heading_col], errors="coerce"),
-    )
-    return out
-
-
-def add_arc_length(
-    candidates: pd.DataFrame,
-    *,
-    start_x_col: str = "arc_start_x",
-    start_y_col: str = "arc_start_y",
-    end_x_col: str = "arc_end_x",
-    end_y_col: str = "arc_end_y",
-) -> pd.DataFrame:
-    """Add straight-line endpoint length in metres for each directed arc.
-
-    This is a chord length based on projected UTM coordinates. If road arcs are
-    polylines, replace this with the sum of segment lengths when full geometry
-    becomes available.
-    """
-    out = candidates.copy()
-    required = [start_x_col, start_y_col, end_x_col, end_y_col]
-    missing = [c for c in required if c not in out]
+    required = BASE_COLUMNS
+    missing = sorted(required - set(candidate_rows.columns))
     if missing:
-        raise ValueError(
-            "arc_length needs endpoint coordinates from .nodes/.arcs: "
-            + ", ".join(missing)
-        )
-    dx = pd.to_numeric(out[end_x_col], errors="coerce") - pd.to_numeric(
-        out[start_x_col], errors="coerce"
-    )
-    dy = pd.to_numeric(out[end_y_col], errors="coerce") - pd.to_numeric(
-        out[start_y_col], errors="coerce"
-    )
-    out["arc_length"] = np.hypot(dx, dy)
-    return out
+        raise ValueError(f"Candidate rows missing columns: {missing}")
+    for key in ("track", "nodes", "arcs"):
+        if key not in trip:
+            raise ValueError(f"trip must contain {key!r}; use src.data_prep.load_trip/project_trip")
+    track = trip["track"]
+    nodes = trip["nodes"]
+    arcs = trip["arcs"]
+
+    # Work from ordered track rows, not from candidate-row order.
+    gps = track[["x", "y", "timestamp"]].copy()
+    dx = gps["x"].diff().to_numpy(dtype=float)
+    dy = gps["y"].diff().to_numpy(dtype=float)
+    movement_bearing = _bearing_deg(dx, dy)
+    movement_bearing[0] = np.nan
+    movement_bearing[np.hypot(dx, dy) < 0.01] = np.nan
+    gps_heading = pd.Series(movement_bearing).ffill().to_numpy()
+
+    timestamps = pd.to_datetime(gps["timestamp"], errors="coerce", utc=True)
+    dt = timestamps.diff().dt.total_seconds().to_numpy()
+    step = np.hypot(dx, dy)
+    speed = np.divide(step, dt, out=np.full(len(gps), np.nan), where=(dt > 0) & np.isfinite(dt))
+    # Avoid absurd velocities over recording gaps; preserve valid speed values.
+    speed[(dt > 30) | (speed > 70)] = np.nan
+
+    arc_xy = nodes[["x", "y"]].to_numpy(dtype=float)
+    arc_nodes = arcs[["from_node", "to_node"]].to_numpy(dtype=int)
+    starts = arc_xy[arc_nodes[:, 0]]
+    ends = arc_xy[arc_nodes[:, 1]]
+    vectors = ends - starts
+    lengths = np.hypot(vectors[:, 0], vectors[:, 1])
+    arc_bearing = _bearing_deg(vectors[:, 0], vectors[:, 1])
+
+    c = candidate_rows.copy()
+    pi = c["point_idx"].to_numpy(dtype=int)
+    ai = c["arc_id"].to_numpy(dtype=int)
+    if (pi < 0).any() or (pi >= len(gps)).any():
+        raise ValueError("point_idx contains indices outside the trip track")
+    if (ai < 0).any() or (ai >= len(arcs)).any():
+        raise ValueError("arc_id contains indices outside the trip arcs")
+
+    c["heading_difference"] = _angle_delta(gps_heading[pi], arc_bearing[ai])
+    c["arc_length"] = lengths[ai]
+    c["speed"] = speed[pi]
+
+    # Scalar projection of GPS coordinate onto each directed arc's endpoint vector.
+    p = gps[["x", "y"]].to_numpy(dtype=float)[pi]
+    a = starts[ai]
+    v = vectors[ai]
+    denom = np.einsum("ij,ij->i", v, v)
+    numer = np.einsum("ij,ij->i", p - a, v)
+    c["position_along_arc"] = np.divide(
+        numer, denom, out=np.full(len(c), np.nan), where=denom > 0
+    ).clip(0.0, 1.0)
+
+    # Keep distance/rank from Person 1's candidate builder; canonical numeric types.
+    c["dist_to_arc"] = pd.to_numeric(c["dist_to_arc"], errors="coerce")
+    c["dist_rank"] = pd.to_numeric(c["dist_rank"], errors="coerce")
+    return c
 
 
-def add_speed(
-    candidates: pd.DataFrame,
-    *,
-    timestamp_col: str = "timestamp",
-    x_col: str = "x",
-    y_col: str = "y",
-    group_cols: Iterable[str] = ("trip_id",),
-) -> pd.DataFrame:
-    """Add GPS speed in metres/second from consecutive points in each trip.
-
-    Duplicate candidate rows for a point receive the same speed. Timestamps
-    must be parseable; coordinates are UTM metres as supplied by Person 1.
-    """
-    out = candidates.copy()
-    point_key = list(group_cols) + ["point_idx"]
-    points = out[point_key + [timestamp_col, x_col, y_col]].drop_duplicates(point_key)
-    points = points.sort_values(point_key).copy()
-    points[timestamp_col] = pd.to_datetime(points[timestamp_col], errors="coerce", utc=True)
-    group = points.groupby(list(group_cols), sort=False)
-    dt = group[timestamp_col].diff().dt.total_seconds()
-    dx = group[x_col].diff()
-    dy = group[y_col].diff()
-    points["speed"] = np.hypot(dx, dy) / dt.where(dt > 0)
-    out = out.merge(points[point_key + ["speed"]], on=point_key, how="left", validate="many_to_one")
-    return out
-
-
-def add_position_along_arc(
-    candidates: pd.DataFrame,
-    *,
-    start_x_col: str = "arc_start_x",
-    start_y_col: str = "arc_start_y",
-    end_x_col: str = "arc_end_x",
-    end_y_col: str = "arc_end_y",
-    point_x_col: str = "x",
-    point_y_col: str = "y",
-) -> pd.DataFrame:
-    """Project the GPS point onto the arc endpoint chord, clipped to [0, 1]."""
-    out = candidates.copy()
-    required = [start_x_col, start_y_col, end_x_col, end_y_col, point_x_col, point_y_col]
-    missing = [c for c in required if c not in out]
-    if missing:
-        raise ValueError(
-            "position_along_arc needs GPS and arc endpoint coordinates: "
-            + ", ".join(missing)
-        )
-    ax = out[start_x_col].astype(float)
-    ay = out[start_y_col].astype(float)
-    vx = out[end_x_col].astype(float) - ax
-    vy = out[end_y_col].astype(float) - ay
-    px = out[point_x_col].astype(float) - ax
-    py = out[point_y_col].astype(float) - ay
-    denom = vx * vx + vy * vy
-    projection = (px * vx + py * vy) / denom.where(denom > 0)
-    out["position_along_arc"] = projection.clip(0.0, 1.0)
-    return out
-
-
-def build_feature_table(
-    candidates: pd.DataFrame,
-    *,
-    require_all_features: bool = True,
-) -> pd.DataFrame:
-    """Return candidates with the agreed six features in the agreed order.
-
-    Expected optional geometry columns are gps_heading, arc_heading,
-    arc_start_x/y, arc_end_x/y. Feature calculations are deterministic and
-    preserve all original metadata columns.
-    """
-    missing = sorted(REQUIRED_BASE_COLUMNS - set(candidates.columns))
-    if missing:
-        raise ValueError(f"Candidate table is missing required columns: {missing}")
-
-    out = candidates.copy()
-    out["dist_to_arc"] = pd.to_numeric(out["dist_to_arc"], errors="coerce")
-    out["dist_rank"] = pd.to_numeric(out["dist_rank"], errors="coerce")
-
-    # The following calls intentionally require explicit geometry columns.
-    if "gps_heading" in out.columns and "arc_heading" in out.columns:
-        out = add_heading_difference(out)
-    if all(c in out.columns for c in ["arc_start_x", "arc_start_y", "arc_end_x", "arc_end_y"]):
-        out = add_arc_length(out)
-        out = add_position_along_arc(out)
-    if "speed" not in out.columns:
-        out = add_speed(out)
-
-    missing_features = [c for c in FEATURE_COLUMNS if c not in out.columns]
-    if missing_features and require_all_features:
-        raise ValueError(
-            "Cannot build the complete model matrix yet. Missing feature(s): "
-            + ", ".join(missing_features)
-            + ". Join arc endpoint coordinates/bearings from .nodes/.arcs and "
-              "derive GPS heading from the ordered .track points."
-        )
-    return out
+def build_feature_table(candidates: pd.DataFrame, trip: dict) -> pd.DataFrame:
+    """Convenience wrapper which returns all six agreed features plus metadata."""
+    return build_trip_features(candidates, trip)
 
 
 def get_feature_matrix(feature_table: pd.DataFrame) -> pd.DataFrame:
-    """Select the exact common feature names and order for every model."""
-    missing = [c for c in FEATURE_COLUMNS if c not in feature_table.columns]
+    """Select the exact agreed feature order for all model implementations."""
+    missing = [name for name in FEATURE_COLUMNS if name not in feature_table.columns]
     if missing:
-        raise ValueError(f"Feature table lacks required columns: {missing}")
+        raise ValueError(f"Feature table lacks required features: {missing}")
     return feature_table.loc[:, FEATURE_COLUMNS].astype(float)
