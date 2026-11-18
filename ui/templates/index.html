@@ -1,4 +1,4 @@
-﻿<!doctype html>
+<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -54,6 +54,7 @@
         <div><dt>{{ label }}</dt><dd>{{ value }}</dd></div>
       {% endfor %}
     </dl>
+    {% if not reference_available %}<p>Reference scores unavailable for this trip.</p>{% endif %}
     <iframe title="Predicted route for trip {{ selected }}"
             sandbox="allow-scripts" srcdoc="{{ route }}"></iframe>
   {% endif %}

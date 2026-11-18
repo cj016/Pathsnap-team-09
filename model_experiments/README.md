@@ -31,4 +31,4 @@ All five models use the same trip-grouped cross-validation folds and student-tes
 - `mlp_loss.csv` and `mlp_training_loss.png`: MLP training loss.
 - `example_point.csv`: a held-out example comparing LightGBM and MLP probabilities, when a suitable point exists.
 
-Run the commands locally and use only the resulting output files when reporting final metrics. This code change adds the five-model experiment; it does not itself produce fresh model results.
+Published results span multiple runs. The RF/KNN quick run used two folds. Use a fresh output directory for a controlled five-model comparison. The live API check and its model are documented in the [project README](../README.md).

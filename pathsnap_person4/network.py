@@ -13,6 +13,8 @@ import networkx as nx
 import numpy as np
 from pyproj import Transformer
 
+from src.data_prep import utm_epsg
+
 
 def _table(path: Path, cols: int, dtype: type) -> np.ndarray:
     if not path.is_file():
@@ -55,12 +57,11 @@ class TripNetwork:
         if arcs.min() < 0 or arcs.max() >= len(nodes):
             raise ValueError("Arc endpoints refer to nonexistent nodes")
 
-        mid_lon = float(np.median(track[:, 0]))
-        mid_lat = float(np.median(track[:, 1]))
+        mid_lon = float(np.mean(track[:, 0]))
+        mid_lat = float(np.mean(track[:, 1]))
         if not -80 <= mid_lat <= 84:
             raise ValueError("Trip is outside the supported UTM latitude range")
-        zone = max(1, min(60, int((mid_lon + 180) // 6) + 1))
-        epsg = (32600 if mid_lat >= 0 else 32700) + zone
+        epsg = utm_epsg(mid_lon, mid_lat)
         transformer = Transformer.from_crs("EPSG:4326", f"EPSG:{epsg}", always_xy=True)
         nx_, ny_ = transformer.transform(nodes[:, 0], nodes[:, 1])
         tx, ty = transformer.transform(track[:, 0], track[:, 1])
@@ -136,7 +137,7 @@ class TripNetwork:
             if arc is None:
                 continue
             arc = int(arc)
-            if arc == prev:
+            if arc == prev and self.position_fraction(idx, arc) >= self.position_fraction(idx - 1, arc):
                 continue
             start, end = map(int, self.arcs[arc])
             if prev is not None:

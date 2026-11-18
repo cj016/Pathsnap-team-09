@@ -18,18 +18,25 @@ def list_trips(partition):
     return sorted(p for p in (DATA / partition).iterdir() if p.is_dir())
 
 
-def load_trip(trip_dir):
-    """Read the 4 files of one trip into DataFrames (row index = node_id / arc_id)."""
+def load_inputs(trip_dir):
+    """Read the public GPS observations and directed network."""
     trip_dir = Path(trip_dir)
     tid = trip_dir.name
-    read = lambda ext, cols: pd.read_csv(trip_dir / f"{tid}.{ext}", sep=r"\s+", header=None, names=cols)
+    def read(ext, cols):
+        return pd.read_csv(trip_dir / f"{tid}.{ext}", sep=r"\s+", header=None, names=cols)
     return {
         "trip_id": tid,
         "track": read("track", ["lon", "lat", "timestamp"]),
         "nodes": read("nodes", ["lon", "lat"]),
         "arcs": read("arcs", ["from_node", "to_node"]),
-        "route": read("route", ["arc_id"])["arc_id"].to_numpy(),
     }
+
+
+def load_trip(trip_dir):
+    trip = load_inputs(trip_dir)
+    route = Path(trip_dir) / f"{trip['trip_id']}.route"
+    trip["route"] = pd.read_csv(route, sep=r"\s+", header=None, names=["arc_id"])["arc_id"].to_numpy()
+    return trip
 
 
 def validate_trip(trip, partition):
@@ -68,7 +75,7 @@ def validate_trip(trip, partition):
 # ---------- Step 3: UTM projection ----------
 def utm_epsg(lon, lat):
     """EPSG code of the UTM zone containing (lon, lat): 326xx north, 327xx south."""
-    zone = int((lon + 180) // 6) + 1
+    zone = min(60, max(1, int((lon + 180) // 6) + 1))
     return (32600 if lat >= 0 else 32700) + zone
 
 
@@ -115,7 +122,7 @@ def label_points(trip, lines, window=5, max_dist=50.0):
 
 
 # ---------- Step 5: candidate generation ----------
-def candidates(trip, lines, partition, radius):
+def spatial_candidates(trip, lines, partition, radius):
     """All arcs within `radius` metres of each GPS point (shapely STRtree), one row per (point, arc)."""
     t = trip["track"]
     pts = shapely.points(t[["x", "y"]].to_numpy())
@@ -138,6 +145,12 @@ def candidates(trip, lines, partition, radius):
     })
     c = c.sort_values(["point_idx", "dist_to_arc"], ignore_index=True)
     c["dist_rank"] = c.groupby("point_idx").cumcount() + 1  # 1 = nearest arc
+    return c
+
+
+def candidates(trip, lines, partition, radius):
+    t = trip["track"]
+    c = spatial_candidates(trip, lines, partition, radius)
     c["label"] = (c["arc_id"].to_numpy() == t["label"].to_numpy()[c["point_idx"]]).astype(int)
     c["label_uncertain"] = t["label_uncertain"].to_numpy()[c["point_idx"]]
     return c

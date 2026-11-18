@@ -24,3 +24,29 @@ def tiny_trip(tmp_path):
 @pytest.fixture
 def tiny_network(tiny_trip):
     return TripNetwork.from_directory(tiny_trip)
+
+
+@pytest.fixture
+def fitted_artifacts(tmp_path):
+    import json
+
+    import joblib
+    import numpy as np
+    import pandas as pd
+    from sklearn.impute import SimpleImputer
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.pipeline import make_pipeline
+
+    from features.feature_engineering import FEATURE_COLUMNS
+
+    directory = tmp_path / "artifacts"
+    directory.mkdir()
+    samples = pd.DataFrame(
+        np.arange(24).reshape(4, 6), columns=FEATURE_COLUMNS
+    )
+    model = make_pipeline(SimpleImputer(), LogisticRegression())
+    model.fit(samples, [0, 0, 1, 1])
+    joblib.dump(model, directory / "model.joblib")
+    config = {"feature_columns": FEATURE_COLUMNS, "positive_class": 1}
+    (directory / "model_config.json").write_text(json.dumps(config))
+    return directory

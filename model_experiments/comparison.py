@@ -24,7 +24,7 @@ def write_comparison(output):
         "student_total_points": test.gps_points,
         "fit_seconds": test.fit_seconds,
         "inference_seconds": test.inference_seconds,
-    }).reindex(MODEL_ORDER)
+    }).reindex([name for name in MODEL_ORDER if name in test.index])
     summary.to_csv(output / "comparison.csv", index_label="model")
 
 
