@@ -6,3 +6,5 @@ __pycache__/
 .claude/
 *.parquet
 /sample_candidates_one_trip.csv
+/processed.zip
+/candidates_train.csv
