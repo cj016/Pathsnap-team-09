@@ -1,4 +1,4 @@
-"""Nearest-candidate baseline: always choose dist_rank == 1."""
+"""Nearest-arc baseline, matching Person 1's distance-rank definition."""
 from __future__ import annotations
 import pandas as pd
 
@@ -8,7 +8,6 @@ def nearest_candidate_predictions(candidates: pd.DataFrame) -> pd.DataFrame:
     missing = required - set(candidates.columns)
     if missing:
         raise ValueError(f"Candidate table missing columns: {sorted(missing)}")
-    # Stable tie handling: preserve CSV order when two candidates share rank.
     return (
         candidates.sort_values(["trip_id", "point_idx", "dist_rank"], kind="stable")
         .drop_duplicates(["trip_id", "point_idx"])
@@ -17,23 +16,20 @@ def nearest_candidate_predictions(candidates: pd.DataFrame) -> pd.DataFrame:
     )
 
 
-def nearest_candidate_top1(candidates: pd.DataFrame, point_inventory: pd.DataFrame) -> dict:
-    """Score nearest-candidate selection; zero-candidate points count as misses."""
-    if "reference_arc_id" not in point_inventory:
-        positives = (
-            candidates.loc[candidates["label"].astype(int).eq(1),
-                           ["trip_id", "point_idx", "arc_id"]]
-            .drop_duplicates(["trip_id", "point_idx"])
-            .rename(columns={"arc_id": "reference_arc_id"})
-        )
-        inventory = point_inventory.drop_duplicates(["trip_id", "point_idx"]).merge(
-            positives, on=["trip_id", "point_idx"], how="left"
-        )
-    else:
-        inventory = point_inventory.drop_duplicates(["trip_id", "point_idx"]).copy()
-
-    predictions = nearest_candidate_predictions(candidates)
-    scored = inventory.merge(predictions, on=["trip_id", "point_idx"], how="left")
+def nearest_candidate_top1(candidates: pd.DataFrame, inventory: pd.DataFrame,
+                           *, include_uncertain: bool = False) -> dict:
+    """Top-1 accuracy for rank=1; missing-candidate points count as incorrect."""
+    required = {"trip_id", "point_idx", "reference_arc_id"}
+    missing = required - set(inventory.columns)
+    if missing:
+        raise ValueError(f"Point inventory missing columns: {sorted(missing)}")
+    points = inventory.drop_duplicates(["trip_id", "point_idx"]).copy()
+    if not include_uncertain:
+        if "label_uncertain" not in points:
+            raise ValueError("Certain-only baseline requires label_uncertain.")
+        points = points.loc[~points["label_uncertain"].astype(bool)]
+    pred = nearest_candidate_predictions(candidates)
+    scored = points.merge(pred, on=["trip_id", "point_idx"], how="left")
     correct = scored["predicted_arc_id"].notna() & (
         scored["predicted_arc_id"] == scored["reference_arc_id"]
     )
