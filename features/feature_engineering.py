@@ -84,8 +84,15 @@ def build_trip_features(candidate_rows: pd.DataFrame, trip: dict, lines=None) ->
     movement_bearing[np.hypot(dx, dy) < 0.01] = np.nan
     gps_heading = pd.Series(movement_bearing).ffill().to_numpy()
 
-    timestamps = pd.to_datetime(gps["timestamp"], errors="coerce", utc=True)
-    dt = timestamps.diff().dt.total_seconds().to_numpy()
+    # Person 1's .track loader reads timestamps as numeric seconds (their
+    # validation/EDA reports median timestamp delta = 1 second). Do not pass
+    # numeric seconds to pd.to_datetime: pandas would interpret them as ns.
+    raw_timestamps = gps["timestamp"]
+    if pd.api.types.is_numeric_dtype(raw_timestamps):
+        dt = pd.to_numeric(raw_timestamps, errors="coerce").diff().to_numpy(dtype=float)
+    else:
+        timestamps = pd.to_datetime(raw_timestamps, errors="coerce", utc=True)
+        dt = timestamps.diff().dt.total_seconds().to_numpy()
     step = np.hypot(dx, dy)
     speed = np.divide(step, dt, out=np.full(len(gps), np.nan), where=(dt > 0) & np.isfinite(dt))
     # Avoid absurd velocities over recording gaps; preserve valid speed values.
